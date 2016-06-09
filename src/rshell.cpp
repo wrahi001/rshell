@@ -1,307 +1,546 @@
 #include <iostream>
-#include <vector>
 #include <string>
-#include <cstdlib>
-#include <cstring>
-#include <stdio.h>
-#include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <sys/types.h>
-#include <pwd.h>
+#include <sys/wait.h>
 #include <stdio.h>
-#include "rshell.h"
+#include <stdlib.h>
+#include <string.h>
 
 using namespace std;
 
-bool firstWordIs(char *word, string subWord)
+
+
+void die(const char*);
+
+// split the input line into an array
+void parse(char *text, char **ca)
 {
-    int i;
-    for (i = 0; i < (int)subWord.size(); i++)
-    {
-        if (word[i] != subWord[i])
-            return false;
+  while (*text != '\0')
+  {    /* if not the end of line ....... */
+    while (*text == ' ' || *text == '\t' || *text == '\n')
+    *text++ = '\0';  
+    *ca++ = text;    
+    while (*text != '\0' && *text != ' ' &&
+    *text != '\t' && *text != '\n')
+    text++;         }
+  *ca = '\0';        
+}
+
+// execute the command that's been split up into an array
+bool execute(char **ca)
+{
+  pid_t pid = fork();
+  int status;
+
+  if (pid < 0)
+  {  
+    perror("fork failed");
+    exit(1);
+  }
+  else if (pid == 0)
+  {    
+    if (execvp(*ca, ca) < 0)
+    {        perror("execvp failed");
+      exit(1);
     }
-    if (word[i] != '\0')
+  }
+  else
+  {                
+    while (waitpid(pid, &status, 0) != pid)        ;
+    if (WIFEXITED(status))
     {
+      if (WEXITSTATUS(status) != 0)
+      {
         return false;
+      }
     }
-    return true;
+  }
+  return true;
 }
 
-string substr(char *word, int pos, int len)
-{
-    string temp = "";
+// for piping two commands
+bool execute2(char **ca1, char **ca2) {
+  int pipe_d[2];
+  pid_t prc;
+  int filedes0;
+  int filedes1;
 
-    for (int i = pos; i < pos + len; i++)
-    {
-        temp += word[i];
-    }
-    return temp;
+  // save the stdin and stdout file descriptors
+  filedes0 = dup(0);
+  filedes1 = dup(1);
+
+  if(pipe(pipe_d) == -1)
+  die("pipe()");
+
+  prc = fork();
+  if(prc == (pid_t)(-1))
+  die("fork()"); /* fork failed */
+
+  if(prc == (pid_t)0) {
+    /* prc process */
+
+    close(1);       /* close stdout */
+
+    if(dup(pipe_d[1]) == -1)
+    die("dup()");
+
+    
+    if(!execute(ca1))
+    die("execlp()");
+
+    _exit(EXIT_SUCCESS);
+  } else {
+    
+
+    close(0);       
+
+    if(dup(pipe_d[0]) == -1)
+    die("dup()");
+
+    
+    if(!execute(ca2))
+    die("execlp()");
+
+    // exit(EXIT_SUCCESS);
+  }
+
+  // restore the stdin and stdout file descriptors
+  dup2(filedes0, 0);
+  dup2(filedes1, 1);
+  close(filedes0);
+  close(filedes1);
+
+  return true;
 }
 
-string substr2(char *word, int pos)
-{
-    string temp = "";
-    int i = pos;
-
-    while (word[i] != '\0')
-    {
-        temp += word[i];
-        i++;
-    }
-    return temp;
+void die(const char *msg) {
+  perror(msg);
+  exit(EXIT_FAILURE);
 }
 
-bool runTest(char *command)
+// for an input redirector
+bool input_redirection(char **ca, string inputfile) {
+  int input;
+  bool execution_result;
+  int filedes0;
+
+  // save the stdin file descriptor
+  filedes0 = dup(0);
+
+  // open input file
+  input = open(inputfile.c_str(), O_RDONLY);
+
+  // replace standard input with input file
+  dup2(input, 0);
+
+  // close unused file descriptors
+  close(input);
+
+  // execute
+  execution_result = execute(ca);
+
+  // restore the stdin file descriptor
+  dup2(filedes0, 0);
+  close(filedes0);
+
+  return execution_result;
+}
+
+// for an output redirector
+bool out_redirection(char **ca, string output_file) {
+  int out;
+  bool execution_result;
+  int filedes1;
+
+  // save the stdin and stdout file descriptors
+  filedes1 = dup(1);
+
+  // open output file
+  out = open(output_file.c_str(), O_WRONLY | O_TRUNC | O_CREAT, S_IRUSR | S_IRGRP | S_IWGRP | S_IWUSR);
+
+  // replace standard output with output file
+  dup2(out, 1);
+
+  // close unused file descriptor
+  close(out);
+
+  // execute
+  execution_result = execute(ca);
+
+  // restore the stdout file descriptor
+  dup2(filedes1, 1);
+  close(filedes1);
+
+  return execution_result;
+}
+
+// for an appending output redirector
+bool out_redirection2(char **ca, string output_file) {
+  int out;
+  bool execution_result;
+  int filedes1;
+
+  // save the stdin and stdout file descriptors
+  
+  filedes1 = dup(1);
+
+  // open input and output files
+  out = open(output_file.c_str(), O_WRONLY | O_APPEND, S_IRUSR | S_IRGRP | S_IWGRP | S_IWUSR);
+
+  // replace standard output with output file
+  dup2(out, 1);
+
+  // close unused file descriptor
+  close(out);
+
+  // execute
+  execution_result = execute(ca);
+
+  // restore the stdout file descriptor
+  dup2(filedes1, 1);
+  close(filedes1);
+
+  return execution_result;
+}
+
+bool exe_test(string command)
 {
-    struct stat stats;
-    string testArg = "";
-    const char *c;
+  struct stat statb;
+  string string_test = "";
+  const char *character;
 
-    if (firstWordIs(command, "test"))
+  if (command.substr(0, 5) == "test ")
+  { // example: test -e test.txt
+    // get the argument
+    string_test = command.substr(5, 3);
+
+    // strip "test " and the argument from the command to get just the file/directory name
+    if (string_test == "-e " || string_test == "-f " || string_test == "-d ")
     {
-        // example: test -e test.txt
-        // get the argument
-        testArg = substr(command, 5, 2);
-
-        // strip "test " and the argument from the command to get just the file/directory name
-        if (testArg == "-e" || testArg == "-f" || testArg == "-d")
-        {
-            c = substr2(command, 5 + 3).c_str();
-        }
-        else
-        {
-            c = substr2(command, 5).c_str();
-        }
+      character = command.substr(5 + 3).c_str();
     }
     else
     {
-        // example: [ -e test.txt ]
-        // get the argument
-        testArg = substr(command, 2, 2);
-
-        // strip "[ ," " ]," and the argument from the command to get just the file/directory name
-        if (testArg == "-e" || testArg == "-f" || testArg == "-d")
-        {
-            c = substr2(command, 2 + 3).c_str();
-        }
-        else
-        {
-            c = substr2(command, 2).c_str();
-        }
+      character = command.substr(5).c_str();
     }
+  }
+  else
+  { // example: [ -e test.txt ]
+    // get the argument
+    string_test = command.substr(2, 3);
 
-    // display whether the file/directory exists
-    if (stat(c, &stats) == -1)
+    // strip "[ ", " ]", and the argument from the command to get just the file/directory name
+    if (string_test == "-e " || string_test == "-f " || string_test == "-d ")
     {
+      character = command.substr(2 + 3, command.length() - (2 + 3) - 2).c_str();
+    }
+    else
+    {
+      character = command.substr(2, command.length() - 2).c_str();
+    }
+  }
+
+  // display whether the file/directory exists
+  if (stat(character, &statb) == -1)
+  {
+    cout << "(False)" << endl;
+    return false;
+  }
+  else
+  {
+    // display whether the file/directory is a file
+    if (string_test == "-f ")
+    {
+      if ((statb.st_mode & S_IFMT) != S_IFREG)
+      {
         cout << "(False)" << endl;
         return false;
+      }
+      else
+      {
+        cout << "(True)" << endl;
+        return true;
+      }
+    }
+    // display whether the file/directory is a directory
+    else if (string_test == "-d ")
+    {
+      if ((statb.st_mode & S_IFMT) != S_IFDIR)
+      {
+        cout << "(False)" << endl;
+        return false;
+      }
+      else
+      {
+        cout << "(True)" << endl;
+        return true;
+      }
     }
     else
     {
-        // display whether the file/directory is a file
-        if (testArg == "-f")
-        {
-            if ((stats.st_mode & S_IFMT) != S_IFREG)
-            {
-                cout << "(False)" << endl;
-                return false;
-            }
-            else
-            {
-                cout << "(True)" << endl;
-                return true;
-            }
-        }
-        // display whether the file/directory is a directory 
-        else if (testArg == "-d")
-        {
-            if ((stats.st_mode & S_IFMT) != S_IFDIR)
-            {
-                cout << "(False)" << endl;
-                return false;
-            }
-            else
-            {
-                cout << "(True)" << endl;
-                return true;
-            }
-        }
-        else
-        {
-            cout << "(True)" << endl;
-            return true;
-        }
+      cout << "(True)" << endl;
+      return true;
     }
+  }
+}
+
+void trim2(string &s)
+{
+  while (s[0] == ' ')
+  {
+    s = s.substr(1);
+  }
+  while (s[s.length() - 1] == ' ')
+  {
+    s = s.substr(0, s.length() - 1);
+  }
 }
 
 int main()
 {
-    Base *command_pointer = new CompositeCommand;
-    int e = 0;
-    bool ex_result;
-    char **analyzed = new char*[256];
-    char **analyzed2 = new char*[256];
-    bool previous = true;
-    bool skip = false;
-    bool inPar = false;
-    cout << "Welcome to the rshell" << endl;
+  string command = "";
+  string currcommand = ""; // stores a single command from the input line with potentially multiple commands
+  char *ca[64];
+  char *ca2[64];
+  bool execution_result = true;
+  bool prevexecution_result = true;
+  string prevConn = ";";
+  bool doExit = false;
+  bool skipPar = false;
+  bool stopParSkip = false;
+  string prevcommand = "";
+  bool prevPipe = false;
+  bool previnput_redirection = false;
+  bool prevout_redirection = false;
+  bool prevout_redirection2 = false;
 
-    char hostname[1024];
-    gethostname(hostname, 1024);
-    while (true)
+  while (!doExit)
+  {
+
+    // display the command prompt
+    cout << "$ ";
+
+    // read the input
+    getline(cin, command);
+
+    // reset things
+    currcommand = "";
+    execution_result = true;
+    prevexecution_result = true;
+    prevConn = ";";
+    skipPar = false;
+    stopParSkip = false;
+    prevcommand = "";
+    prevPipe = false;
+    previnput_redirection = false;
+    prevout_redirection = false;
+    prevout_redirection2 = false;
+
+    // loop through the command line one character at a time
+    for (int i = 0; i < (int)command.length() + 1; i++)
     {
-        cout << getlogin() << "@";
-        cout << hostname;
-        cout << "$ ";
 
-        command_pointer->get();
-        if (command_pointer->check_if_exit() == "exit")
+      // check if we're in parenthesis
+      if (command[i] == '(')
+      {
+        // if the previous result failed, start skipping everything inside the parenthesis
+        if ((prevConn == "&&" && !prevexecution_result) || (prevConn == "||" && prevexecution_result))
         {
-            exit(1);
+          skipPar = true;
+
+          // set the previous result for use after the parenthesis has been skipped
+          if (prevConn == "&&")
+          {
+            prevexecution_result = prevexecution_result && false;
+          }
+          else if (prevConn == "||")
+          {
+            prevexecution_result = prevexecution_result || false;
+          }
         }
-        command_pointer->analyze(analyzed);
-        /*********************/
-        for (int i = 0; analyzed[i] != NULL; i++)
+        continue;
+      }
+      else if (command[i] == ')')
+      { // we've reached the end of a parenthesis.
+        stopParSkip = true;
+        continue;
+      }
+      else if (command[i] == '|' && command[i + 1] != '|')
+      { // A wild pipe appeared!
+
+        // trim leading and trailing spaces
+        trim2(currcommand);
+
+        prevPipe = true;
+        prevcommand = currcommand;
+        currcommand = "";
+        continue;
+      }
+      else if (command[i] == '<')
+      { // A wild input redirector appeared!
+
+        // trim leading and trailing spaces
+        trim2(currcommand);
+
+        previnput_redirection = true;
+        prevcommand = currcommand;
+        currcommand = "";
+        continue;
+      }
+      else if (command[i] == '>' && command[i + 1] == '>')
+      { // A wild output redirector appeared!
+
+        // trim leading and trailing spaces
+        trim2(currcommand);
+
+        prevout_redirection2 = true;
+        prevcommand = currcommand;
+        currcommand = "";
+        i++;
+        continue;
+      }
+      else if (command[i] == '>')
+      { // A wild output redirector appeared!
+
+        // trim leading and trailing spaces
+        trim2(currcommand);
+
+        prevout_redirection = true;
+        prevcommand = currcommand;
+        currcommand = "";
+        continue;
+      }
+
+      // Here comes a new delimiter!
+      if (command[i] == ';' || command[i] == '&' || command[i] == '|' || command[i] == '#' || i == (int)command.length())
+      {
+        // trim leading and trailing spaces
+        trim2(currcommand);
+
+        // skip to the next iteration if the command is blank after being trimmed
+        if (currcommand == "")
         {
-            for (int j = 0; analyzed[i][j] != '\0'; j++)
-            {
-                if (analyzed[i][j] == '(')
-                {
-                    for (int m = 0; analyzed[i][m] != '\0'; m++)
-                    {
-                        analyzed[i][m] = analyzed[i][m + 1];
-                    }
-                    inPar = true;
-                }
-                if (analyzed[i][j] == ';' && j != 0)
-                {
-                    analyzed[i][j] = '\0';
-                    analyzed2[e] = analyzed[i];
-                    e++;
-                    analyzed2[e] = NULL;
-                    ex_result = command_pointer->execute(analyzed2);
-                    delete[] analyzed2;
-                    analyzed2 = new char*[256];
-                    e = 0;
-                    skip = true;
-                }
-                if (analyzed[i][j] == ')')
-                {
-                    analyzed[i][j] = '\0';
-                    inPar = false;
-                }
-                if (analyzed[i][j] == 'e' && analyzed[i][j + 1] == 'x' && analyzed[i][j + 2] == 'i' && analyzed[i][j + 3] == 't')
-                    exit(1);
-            }
+          continue;
+        }
 
-            if (*analyzed[i] == ';')
-            {
-                if (previous)
-                {
-                    if (firstWordIs(*analyzed2, "test") || firstWordIs(*analyzed2, "["))
-                    {
-                        ex_result = runTest(*analyzed2);
-                    }
-                    else
-                    {
-                        ex_result = command_pointer->execute(analyzed2);
-                    }
-                }
-                delete[] analyzed2;
-                analyzed2 = new char*[256];
-                e = 0;
-            }
-            else if (*analyzed[i] == '&')
-            {
-                if (previous)
-                {
-                    if (firstWordIs(*analyzed2, "test") || firstWordIs(*analyzed2, "["))
-                    {
-                        ex_result = runTest(*analyzed2);
-                    }
-                    else
-                    {
-                        ex_result = command_pointer->execute(analyzed2);
-                    }
-                }
-                delete[] analyzed2;
-                analyzed2 = new char*[256];
-                e = 0;
+        // execute the current command if we're not skipping parenthesis
+        if (!skipPar)
+        {
+          // execute the current command if the previous result was successful
+          if (prevConn == ";" || (prevConn == "&&" && prevexecution_result) || (prevConn == "||" && !prevexecution_result))
+          {
+            if (previnput_redirection)
+            { // we've encountered a normal command
+                            char *currcommand2 = &prevcommand[0];
+              parse(currcommand2, ca);
 
-                if (inPar)
-                    continue;
-
-                if (!ex_result)
-                {
-                    previous = false;
-                }
-                else
-                {
-                    previous = true;
-                }
+              execution_result = input_redirection(ca, currcommand);
+              previnput_redirection = false;
             }
-            else if (*analyzed[i] == '|')
-            {
-                if (previous)
-                {
-                    if (firstWordIs(*analyzed2, "test") || firstWordIs(*analyzed2, "["))
-                    {
-                        ex_result = runTest(*analyzed2);
-                    }
-                    else
-                    {
-                        ex_result = command_pointer->execute(analyzed2);
-                    }
-                }
-                delete[] analyzed2;
-                analyzed2 = new char*[256];
-                e = 0;
+            else if (prevout_redirection)
+            { // we've encountered a normal command
+              
+              char *currcommand2 = &prevcommand[0];
+              parse(currcommand2, ca);
 
-                if (ex_result)
-                    previous = false;
-                else if (inPar)
-                    continue;
-                else
-                    previous = true;
+              execution_result = out_redirection(ca, currcommand);
+              prevout_redirection = false;
             }
-            else if (*analyzed[i] == '#')
-            {
-                break;
+            else if (prevout_redirection2)
+            { // we've encountered a normal command
+              
+              char *currcommand2 = &prevcommand[0];
+              parse(currcommand2, ca);
+
+              execution_result = out_redirection2(ca, currcommand);
+              prevout_redirection2 = false;
+            }
+            else if (prevPipe)
+            { // we've encountered a normal command
+                            char *currcommand2 = &prevcommand[0];
+              char *currcommand3 = &currcommand[0];
+              parse(currcommand2, ca);
+              parse(currcommand3, ca2);
+
+              execution_result = execute2(ca, ca2);
+              prevPipe = false;
+            }
+            else if (currcommand.substr(0, 5) == "test " || currcommand.substr(0, 2) == "[ ")
+            { // we've encountered a test command
+              execution_result = exe_test(currcommand);
+            }
+            else if (currcommand == "exit")
+            { // we've encountered an exit command
+              doExit = true;
+              break;
             }
             else
-            {
-                if (!skip)
-                {
-                    analyzed2[e] = analyzed[i];
-                    e++;
-                    analyzed2[e] = NULL;
-                }
-                else
-                    skip = false;
+            { // we've encountered a normal command
+              char *currcommand2 = &currcommand[0];
+              parse(currcommand2, ca);
+
+              execution_result = execute(ca);
             }
+          }
+
+          if (prevConn == ";")
+          { // for a ";" connector
+            prevexecution_result = execution_result;
+          }
+          else if (prevConn == "&&")
+          { // for a "&&" connector
+            prevexecution_result = prevexecution_result && execution_result;
+          }
+          else if (prevConn == "||")
+          { // for a "||" connector
+            prevexecution_result = prevexecution_result || execution_result;
+          }
+          else if (command[i] == '#')
+          { // for a comment "#"
+            break;
+          }
+          else if (i == (int)command.length())
+          { // we've reached the end of the command. execute whatever is remaining
+            break;
+          }
+
         }
-        if (e > 0)
+
+        // stop skipping parenthesis
+        if (stopParSkip)
         {
-            if (previous)
-            {
-                if (firstWordIs(*analyzed2, "test") || firstWordIs(*analyzed2, "["))
-                {
-                    runTest(*analyzed2);
-                }
-                else
-                {
-                    command_pointer->execute(analyzed2);
-                }
-            }
-            delete[] analyzed2;
-            analyzed2 = new char*[256];
-            e = 0;
-            previous = true;
+          skipPar = false;
+          stopParSkip = false;
         }
-        /*********************************/
+
+        // update the previous connector
+        if (command[i] == ';' || command[i] == '&' || command[i] == '|')
+        {
+          prevConn = command[i];
+        }
+
+        // reset things
+        currcommand = "";
+
+        // skip the second "&&" in the "&&" connector
+        if (command[i] == '&')
+        {
+          i++;
+        }
+
+      }
+      else
+      {
+        // add the current character to the current command variable
+        currcommand += command[i];
+      }
     }
-    return 0;
+  }
+
+  cout << "Exiting..." << endl;
+
+  return 0;
 }

@@ -1,5 +1,5 @@
-Assignment 3: Writing a Basic Command Shell
-===========================================
+Assignment 4: Writing a Basic Command Shell and Redirection
+===========================================================
 
 Introduction
 ------------

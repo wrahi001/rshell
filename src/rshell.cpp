@@ -19,8 +19,7 @@ void die(const char*);
 void parse(char *text, char **ca)
 {
   while (*text != '\0')
-  {    /* if not the end of line ....... */
-    while (*text == ' ' || *text == '\t' || *text == '\n')
+  {        while (*text == ' ' || *text == '\t' || *text == '\n')
     *text++ = '\0';  
     *ca++ = text;    
     while (*text != '\0' && *text != ' ' &&
@@ -77,12 +76,11 @@ bool execute2(char **ca1, char **ca2) {
 
   prc = fork();
   if(prc == (pid_t)(-1))
-  die("fork()"); /* fork failed */
-
+  die("fork()"); 
   if(prc == (pid_t)0) {
-    /* prc process */
+    
 
-    close(1);       /* close stdout */
+    close(1);       
 
     if(dup(pipe_d[1]) == -1)
     die("dup()");
